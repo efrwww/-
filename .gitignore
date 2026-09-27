@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+web/dist/
+dist/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Edge / debugging temp dirs
+.edge-cdp*/
+.edge-cdp-test/
+.edge-profile*/
+.edge-white-comb/
+.edge-white-phone/
+.edge-white-ward/
+
+# Server generated / uploads
+server/public/generated/
+server/public/uploads/
+
+# Runtime data
+data/community.json
+
+# Temp
+.temp/
+
+# Screenshots / media (not part of source)
+*.png
+21.mp4
+
+# Vercel
+.vercel/
+
+# Backup files
+*.bak
