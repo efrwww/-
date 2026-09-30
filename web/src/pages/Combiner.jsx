@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import '../wf-theme.css';
 import { SLUG_OF } from '../workshops-data.js';
 
 const DRAFT_KEY = 'wonder-forge:combiner:draft';
-const HISTORY_KEY = 'wonder-forge:combiner:history';
-const MAX_HISTORY = 20;
+const POLL_INTERVAL_MS = 3000;
 
 const RELIC_STREAMS = [
   {
@@ -71,22 +70,43 @@ export default function Combiner() {
   const [history, setHistory] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
   const [workbenchNotice, setWorkbenchNotice] = useState('');
+  const [progress, setProgress] = useState({ stage: '', text: '' });
+  const [taskId, setTaskId] = useState(null);
+  const pollRef = useRef(null);
+
+  // ===== 服务端历史 =====
+  const refreshHistory = async () => {
+    try {
+      const res = await fetch('/api/history');
+      if (res.ok) setHistory(await res.json());
+    } catch {
+      // 历史加载失败不打断页面
+    }
+  };
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  // 组件卸载时停止轮询
+  useEffect(() => () => stopPolling(), []);
 
   useEffect(() => {
     try {
       const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
-      const savedHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
       if (Array.isArray(draft?.daily)) setDaily(draft.daily);
       if (Array.isArray(draft?.hardware)) setHardware(draft.hardware);
       if (Array.isArray(draft?.ai)) setAi(draft.ai);
       if (typeof draft?.idea === 'string') setIdea(draft.idea);
-      if (Array.isArray(savedHistory)) setHistory(savedHistory.slice(0, MAX_HISTORY));
     } catch {
       localStorage.removeItem(DRAFT_KEY);
-      localStorage.removeItem(HISTORY_KEY);
     } finally {
       setStorageReady(true);
     }
+    refreshHistory();
   }, []);
 
   useEffect(() => {
@@ -114,12 +134,45 @@ export default function Combiner() {
     }, 40));
   };
 
+  // ===== 异步任务：提交 + 轮询 + 取消 =====
+  const startPolling = (id) => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/combine/tasks/${id}`);
+        if (!res.ok) return; // 网络抖动：跳过本轮，下轮重试
+        const task = await res.json();
+        setProgress({ stage: task.stage || 'AI 处理中', text: task.text || '' });
+        if (task.state === 'done') {
+          stopPolling();
+          setTaskId(null);
+          setResult(task.result);
+          setLoading(false);
+          refreshHistory(); // 生成成功后自动落历史库，刷新列表
+        } else if (task.state === 'failed') {
+          stopPolling();
+          setTaskId(null);
+          setError(task.error || '生成失败');
+          setLoading(false);
+        } else if (task.state === 'cancelled') {
+          stopPolling();
+          setTaskId(null);
+          setError('已取消生成');
+          setLoading(false);
+        }
+      } catch {
+        // 轮询网络异常：下轮重试
+      }
+    }, POLL_INTERVAL_MS);
+  };
+
   const combine = async () => {
     setLoading(true);
     setError('');
     setResult(null);
+    setProgress({ stage: '提交中', text: '' });
     try {
-      const res = await fetch('/api/combine', {
+      const res = await fetch('/api/combine/async', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -130,50 +183,58 @@ export default function Combiner() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '请求失败');
-      setResult(data);
-      saveHistory({ daily, hardware, ai, idea, result: data });
+      if (!res.ok) throw new Error(data.error || '提交失败');
+      setTaskId(data.task_id);
+      setProgress({ stage: '已提交，AI 创作中', text: '' });
+      startPolling(data.task_id);
     } catch (e) {
       setError(String(e.message || e));
-    } finally {
       setLoading(false);
     }
   };
 
-  const saveHistory = (entry) => {
-    const record = {
-      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      createdAt: new Date().toISOString(),
-      ...entry,
-    };
-    setHistory((current) => {
-      const next = [record, ...current].slice(0, MAX_HISTORY);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      return next;
-    });
+  const cancelCombine = async () => {
+    const id = taskId;
+    stopPolling();
+    if (id) {
+      try {
+        await fetch(`/api/combine/tasks/${id}`, { method: 'DELETE' });
+      } catch {
+        // 取消请求失败不阻塞：本地直接终止轮询
+      }
+    }
+    setTaskId(null);
+    setLoading(false);
+    setError('已取消生成');
   };
 
   const loadRecord = (record) => {
-    setDaily(record.daily || []);
-    setHardware(record.hardware || []);
-    setAi(record.ai || []);
-    setIdea(record.idea || '');
+    const sel = record.selection || {};
+    setDaily(sel.daily_ids || []);
+    setHardware(sel.hardware_ids || []);
+    setAi(sel.ai_ids || []);
+    setIdea(sel.idea || '');
     setResult(record.result || null);
-    setCategory(record.daily?.length ? 'daily_items' : record.hardware?.length ? 'hardware_parts' : 'ai_modules');
+    setCategory(sel.daily_ids?.length ? 'daily_items' : sel.hardware_ids?.length ? 'hardware_parts' : 'ai_modules');
     setError('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const deleteRecord = (id) => {
-    setHistory((current) => {
-      const next = current.filter((record) => record.id !== id);
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      return next;
-    });
+  const deleteRecord = async (id) => {
+    try {
+      await fetch(`/api/history/${id}`, { method: 'DELETE' });
+    } catch {
+      // 删除失败时刷新一次，以服务端为准
+    }
+    refreshHistory();
   };
 
-  const clearHistory = () => {
-    localStorage.removeItem(HISTORY_KEY);
+  const clearHistory = async () => {
+    try {
+      await fetch('/api/history', { method: 'DELETE' });
+    } catch {
+      // 同上
+    }
     setHistory([]);
   };
 
@@ -424,12 +485,31 @@ export default function Combiner() {
 
         <div style={{ marginTop: 20, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn" onClick={combine} disabled={loading || (!daily.length && !hardware.length && !ai.length)}>
-            {loading ? (<><span className="spin" /> 生成中（约 1-3 分钟）…</>) : '生成产品方案'}
+            {loading ? (<><span className="spin" /> {progress.stage || '生成中'}…</>) : '生成产品方案'}
           </button>
+          {loading && (
+            <button type="button" className="btn ghost" onClick={cancelCombine}>取消生成</button>
+          )}
           <div className="selected-summary">
             已选：{listNames(daily, items.daily_items).join('、') || '无物品'} · {listNames(hardware, items.hardware_parts).join('、') || '无部件'} · {listNames(ai, items.ai_modules).join('、') || '无模组'}
           </div>
         </div>
+
+        {loading && (
+          <div className="card" style={{ marginTop: 14, padding: '14px 16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{progress.stage || 'AI 创作中'}<span className="spin" style={{ marginLeft: 8 }} /></div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>约 1-3 分钟 · 刷新页面任务不丢失，可稍后回来查看</div>
+            </div>
+            {progress.text ? (
+              <div style={{ marginTop: 10, maxHeight: 120, overflow: 'hidden', fontSize: 12, color: 'var(--muted)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                {progress.text.slice(0, 400)}
+              </div>
+            ) : (
+              <div style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>AI 正在构思产品方案，已生成的部分会实时显示在这里…</div>
+            )}
+          </div>
+        )}
 
         {error && <div className="error-box">出错了：{error}</div>}
 
@@ -485,19 +565,20 @@ export default function Combiner() {
           <div className="history-heading">
             <div>
               <div className="section-label">组合记录</div>
-              <div className="history-caption">已保存 {history.length} 条，当前选择会自动保存为草稿</div>
+              <div className="history-caption">已保存 {history.length} 条（服务端存储，换设备不丢失）· 当前选择会自动保存为草稿</div>
             </div>
             {history.length > 0 && <button type="button" className="text-button" onClick={clearHistory}>清空记录</button>}
           </div>
           {history.length === 0 ? (
-            <div className="history-empty">生成产品方案后，组合与效果图会出现在这里。</div>
+            <div className="history-empty">生成产品方案后，组合与效果图会出现在这里（自动保存到服务端）。</div>
           ) : (
             <div className="history-list">
               {history.map((record) => {
+                const sel = record.selection || {};
                 const selectedNames = [
-                  ...listNames(record.daily || [], items?.daily_items || []),
-                  ...listNames(record.hardware || [], items?.hardware_parts || []),
-                  ...listNames(record.ai || [], items?.ai_modules || []),
+                  ...listNames(sel.daily_ids || [], items?.daily_items || []),
+                  ...listNames(sel.hardware_ids || [], items?.hardware_parts || []),
+                  ...listNames(sel.ai_ids || [], items?.ai_modules || []),
                 ];
                 return (
                   <div className="history-row" key={record.id}>

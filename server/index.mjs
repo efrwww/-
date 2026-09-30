@@ -1,52 +1,61 @@
+// WonderForge 后端入口：装配中间件、API 路由、静态资源与 SPA fallback
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { loadItems, runCombination } from './forge.mjs';
-import { registerCommunity } from './community.mjs';
+import { requestLogger } from './middleware/requestLogger.mjs';
+import { errorHandler, apiNotFound } from './middleware/errorHandler.mjs';
+import { taskStats } from './services/taskManager.mjs';
+import itemsRouter from './routes/items.mjs';
+import combineRouter from './routes/combine.mjs';
+import historyRouter from './routes/history.mjs';
+import communityRouter from './routes/community.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const PORT = process.env.PORT || 8787;
 
 const app = express();
+app.disable('x-powered-by');
+
+// ===== 全局中间件 =====
+app.use(requestLogger());                       // 请求日志：方法/路径/状态码/耗时
 app.use(cors());
-app.use(express.json({ limit: '1mb' }));
+app.set('trust proxy', true);                   // 反代场景下 req.ip 取真实来源
+app.use(express.json({ limit: '1mb' }));       // JSON 请求体
 
-// ===== API 路由必须在 express.static 之前注册 =====
+// ===== API 路由 =====
 
-// 健康检查
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, key_configured: Boolean(process.env.XYQ_ACCESS_KEY) });
+// 健康检查：服务状态 + Key 配置 + 任务统计
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    key_configured: Boolean(process.env.XYQ_ACCESS_KEY),
+    tasks: taskStats(),
+    uptime_s: Math.round(process.uptime()),
+  });
 });
 
 // 奇物库
-app.get('/api/items', (req, res) => {
-  res.json(loadItems());
-});
+app.use('/api/items', itemsRouter);
 
-// 组合：提交后同步等待结果（小云雀一般几十秒到几分钟）
-app.post('/api/combine', async (req, res) => {
-  try {
-    const selection = req.body || {};
-    const selected = [...(selection.daily_ids || []), ...(selection.hardware_ids || []), ...(selection.ai_ids || [])];
-    if (!selected.length || selected.some((id) => typeof id !== 'string')) {
-      return res.status(400).json({ error: '请至少选择一件物品或模组' });
-    }
-    const result = await runCombination(selection);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: String(err?.message || err) });
-  }
-});
+// 组合生成（异步任务 + 旧同步兼容）
+app.use('/api/combine', combineRouter);
 
-// 社区 API
-registerCommunity(app, express);
+// 生成历史
+app.use('/api/history', historyRouter);
 
-// ===== 静态文件服务在 API 路由之后 =====
+// 社区：图纸上传走原始字节流，先于 JSON 解析之后单独挂 raw
+app.use('/api/community/uploads', express.raw({ type: 'application/octet-stream', limit: '20mb' }));
+app.use('/api/community', communityRouter);
 
-// 生成的图片缓存目录（小云雀 URL 有时效，落地到本地更稳）
+// API 404 兜底 + 统一错误处理（错误统一输出 JSON，必须放在 API 路由之后）
+app.use('/api', apiNotFound);
+app.use(errorHandler);
+
+// ===== 静态资源 =====
+
+// 生成的效果图缓存目录（小云雀 URL 有时效，落地到本地更稳）
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const GEN_DIR = path.join(PUBLIC_DIR, 'generated');
 fs.mkdirSync(GEN_DIR, { recursive: true });
@@ -74,4 +83,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`wonder-forge server listening on http://localhost:${PORT}`);
+  console.log(`[xyq] key_configured=${Boolean(process.env.XYQ_ACCESS_KEY)}`);
 });

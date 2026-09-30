@@ -2,7 +2,7 @@ const XYQ_BASE = process.env.XYQ_OPENAPI_BASE || process.env.XYQ_BASE_URL || 'ht
 const ACCESS_KEY = process.env.XYQ_ACCESS_KEY || '';
 
 if (!ACCESS_KEY) {
-  throw new Error('Missing XYQ_ACCESS_KEY. Configure it in server/.env');
+  console.warn('[xyq] Missing XYQ_ACCESS_KEY - AI generation features will be disabled');
 }
 
 const SUBMIT_RUN_PATH = '/api/biz/v1/skill/submit_run';
